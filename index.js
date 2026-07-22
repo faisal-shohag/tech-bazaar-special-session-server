@@ -5,6 +5,7 @@ const express = require("express");
 const dontenv = require("dotenv");
 const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const { createRemoteJWKSet, jwtVerify } = require("jose-cjs");
 dontenv.config();
 
 const uri = process.env.MONGODB_URI;
@@ -27,6 +28,33 @@ const client = new MongoClient(uri, {
     deprecationErrors: true,
   },
 });
+
+const JWKS = createRemoteJWKSet(
+  new URL(`${process.env.CLIENT_URL}/api/auth/jwks`),
+);
+
+const verifyToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    res.status(401).send({ msg: "Unauthorized" });
+  }
+  // "Bearer zjxashsahjdhj".split(" ") // ["Bearer", "xsghagshsf"]
+  const token = authHeader.split(" ")[1];
+  if (!token) {
+    res.status(401).send({ msg: "Unauthorized" });
+  }
+
+  try {
+    const { payload } = await jwtVerify(token, JWKS);
+    req.user = payload
+    next();
+  } catch (error) {
+    console.log(error);
+    res.status(401).send({ msg: "Unauthorized" });
+  }
+
+};
 
 async function run() {
   try {
@@ -79,7 +107,7 @@ async function run() {
       res.send({ pay_result });
     });
 
-    app.post("/product", async (req, res) => {
+    app.post("/product", verifyToken, async (req, res) => {
       const data = req.body;
       const result = await productCollection.insertOne({
         ...data,
@@ -89,10 +117,46 @@ async function run() {
       res.send(result);
     });
 
+    /**
+     *     query = {title: {$regex: searchText, $options: "i"}}
+     *
+     */
+
     app.get("/products", async (req, res) => {
-      const result = await productCollection.find().toArray();
+      const searchText = req.query.search || "";
+      let query = {};
+      query.$or = [
+        { title: { $regex: searchText, $options: "i" } },
+        { description: { $regex: searchText, $options: "i" } },
+      ];
+
+      const result = await productCollection.find(query).toArray();
 
       res.send(result);
+    });
+
+    /**
+     * 1. total_page = Math.ceil(total_data/limit)
+     * 2. skip = (page-1) * limit
+     */
+
+    app.get("/seller/products", verifyToken,  async (req, res) => {
+      const limit = Number(req.query.limit) || 10;
+      const page = Number(req.query.page) || 1;
+      const user = req.user
+
+      const total_data = await productCollection.countDocuments();
+      const total_page = Math.ceil(total_data / limit);
+
+      const skip = (page - 1) * limit;
+
+      const data = await productCollection
+        .find({userId: user.id})
+        .skip(skip)
+        .limit(limit)
+        .toArray();
+
+      res.send({ total_page, skip, page, data });
     });
 
     app.get("/product/:id", async (req, res) => {
